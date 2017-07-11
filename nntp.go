@@ -289,15 +289,20 @@ func (c *Conn) cmd(expectCode uint, format string, args ...interface{}) (code ui
 		return 0, "", err
 	}
 	line = strings.TrimSpace(line)
+	if line == "235" {
+		line = "235 Article transferred OK"
+	}
 	if len(line) < 4 || line[3] != ' ' {
 		return 0, "", ProtocolError("short response: " + line)
 	}
+
 	i, err := strconv.ParseUint(line[0:3], 10, 0)
 	if err != nil {
 		return 0, "", ProtocolError("invalid response code: " + line)
 	}
 	code = uint(i)
 	line = line[4:]
+
 	if 1 <= expectCode && expectCode < 10 && code/100 != expectCode ||
 		10 <= expectCode && expectCode < 100 && code/10 != expectCode ||
 		100 <= expectCode && expectCode < 1000 && code != expectCode {
@@ -546,6 +551,13 @@ func (c *Conn) Next() (number, msgid string, err error) {
 	return c.nextLastStat("NEXT", "")
 }
 
+func (c *Conn) StatMessageID(msgid string) (io.Reader, error) {
+	if _, _, err := c.cmd(220, fmt.Sprintf("STAT %s", msgid)); err != nil {
+		return nil, err
+	}
+	return c.body(), nil
+}
+
 // ArticleText returns the article named by id as an io.Reader.
 // The article is in plain text format, not NNTP wire format.
 func (c *Conn) ArticleText(id string) (io.Reader, error) {
@@ -637,6 +649,51 @@ func (c *Conn) RawPost(r io.Reader) error {
 // Post posts an article to the server.
 func (c *Conn) Post(a *Article) error {
 	return c.RawPost(&articleReader{a: a})
+}
+
+func (c *Conn) Ihave(msgid string, a *Article) error {
+	return c.RawIhave(msgid, &articleReader{a: a})
+}
+
+func (c *Conn) RawIhave(msgid string, r io.Reader) error {
+
+	if _, _, err := c.cmd(335, fmt.Sprintf("IHAVE %s", msgid)); err != nil {
+		return err
+	}
+
+	br := bufio.NewReader(r)
+	eof := false
+	for {
+		line, err := br.ReadString('\n')
+		if err == io.EOF {
+			eof = true
+		} else if err != nil {
+			return err
+		}
+		if eof && len(line) == 0 {
+			break
+		}
+		if strings.HasSuffix(line, "\n") {
+			line = line[0 : len(line)-1]
+		}
+		var prefix string
+		if strings.HasPrefix(line, ".") {
+			prefix = "."
+		}
+		_, err = fmt.Fprintf(c.conn, "%s%s\r\n", prefix, line)
+		if err != nil {
+			return err
+		}
+		if eof {
+			break
+		}
+	}
+
+	if _, _, err := c.cmd(235, "."); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Quit sends the QUIT command and closes the connection to the server.
